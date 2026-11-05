@@ -1,0 +1,11 @@
+# 构建产物
+.build/
+.cache/
+build/
+
+# 系统
+.DS_Store
+
+# Xcode / 临时
+*.xcuserdatad
+.swiftpm/
