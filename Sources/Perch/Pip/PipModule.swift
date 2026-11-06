@@ -165,9 +165,14 @@ public final class PipModule: PerchModule {
             }
         }
 
+        // 有分身还在跑时给一个很淡的呼吸点（1.4s 一个周期），空闲时归零。
+        let active = clones.values.contains { $0.isActive }
+        let activity = active ? (sin(now * (2 * .pi) / 1.4) + 1) / 2 : 0
+
         ball.setEyeState(PipEyeState(gaze: smoothedGaze,
                                      openness: isDragging ? 1 : 0,
-                                     blink: blinkValue))
+                                     blink: blinkValue,
+                                     activity: activity))
     }
 
     private func trackClones() {

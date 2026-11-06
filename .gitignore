@@ -1,7 +1,9 @@
 # 构建产物
 .build/
+.build-*/
 .cache/
 build/
+dist/
 
 # 系统
 .DS_Store

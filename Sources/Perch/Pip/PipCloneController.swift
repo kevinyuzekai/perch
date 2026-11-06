@@ -1,9 +1,13 @@
 import Foundation
 import AppKit
 
-/// 一个分身：锚定在目标窗口右上角内侧的小球 + 状态灯 + 状态文字，
-/// 订阅 AgentEventBus 显示进度，点击弹出「急停 / 关闭」。
+/// 一个分身：锚定在目标窗口右上角内侧的小球 + 状态灯 + 状态文字条，
+/// 订阅 AgentEventBus 显示「第 N/M 步 · 动作」，点击弹出「急停 / 关闭」。
 final class PipCloneController {
+    /// 终态文字条的停留时长（之后退化成状态灯）。
+    static let finishedHold: TimeInterval = 4.0
+    static let failedHold: TimeInterval = 8.0
+
     let target: ScreenTarget
     let task: AgentTask
 
@@ -17,11 +21,18 @@ final class PipCloneController {
     private var eventToken: UUID?
     private var watchdog: Timer?
     private var pulseTimer: Timer?
+    private var labelHideTimer: Timer?
     private var receivedEvent = false
+    private var labelHidden = false
+    /// 用于作废过期的「淡出后隐藏」回调。
+    private var labelGeneration = 0
     private var pulsePhase: CGFloat = 0
     private var lastFrame: CGRect
 
     var onRequestClose: ((PipCloneController) -> Void)?
+
+    /// 有任务在跑（主球据此显示活跃脉冲）。
+    var isActive: Bool { !status.isTerminal }
 
     private var status: PipCloneStatus = .starting {
         didSet { applyStatus() }
@@ -40,13 +51,15 @@ final class PipCloneController {
                                                                height: PipCloneBallView.side)))
         panel.contentView = ballView
 
-        labelPanel = PipFloatingPanel(contentSize: NSSize(width: 60, height: 16), ignoresMouse: true)
-        labelView = PipCloneLabelView(frame: NSRect(x: 0, y: 0, width: 60, height: 16))
+        labelPanel = PipFloatingPanel(contentSize: NSSize(width: 60, height: PipCloneLabelView.height),
+                                      ignoresMouse: true)
+        labelView = PipCloneLabelView(frame: NSRect(x: 0, y: 0, width: 60, height: PipCloneLabelView.height))
         labelPanel.contentView = labelView
 
         ballView.onTap = { [weak self] in self?.toggleMenu() }
         ballView.status = status
         labelView.text = status.text
+        labelPanel.alphaValue = 1
 
         reposition(to: frame)
         panel.orderFrontRegardless()
@@ -73,15 +86,18 @@ final class PipCloneController {
         case .started(let id, _) where id == task.id:
             receivedEvent = true
             if !status.isTerminal { status = .starting }
-        case .step(let id, let index, _) where id == task.id:
+        case .step(let id, let index, let text) where id == task.id:
             receivedEvent = true
-            status = .running(step: index + 1)
-        case .finished(let id, _) where id == task.id:
+            // index 已经是 1 基（AgentLoopRunner 发的是 step+1），这里不再加一。
+            status = .running(step: index,
+                              total: task.maxSteps,
+                              detail: PipStepSummary.actionLabel(from: text))
+        case .finished(let id, let summary) where id == task.id:
             receivedEvent = true
-            status = .finished
-        case .failed(let id, _) where id == task.id:
+            status = .finished(detail: PipStepSummary.clip(summary, limit: 30))
+        case .failed(let id, let message) where id == task.id:
             receivedEvent = true
-            status = .failed
+            status = .failed(detail: PipStepSummary.clip(message, limit: 40))
         case .cancelled(let id) where id == task.id:
             receivedEvent = true
             status = .cancelled
@@ -93,36 +109,105 @@ final class PipCloneController {
     // MARK: - Layout
 
     /// 锚定到目标窗口右上角内侧（AppKit 全局坐标，左下原点）。
+    /// 文字条右缘贴着球，宽度变化只向左生长，不会左右跳。
     func reposition(to frame: CGRect) {
         lastFrame = frame
         let side = PipCloneBallView.side
         let origin = CGPoint(x: frame.maxX - 6 - side, y: frame.maxY - 6 - side)
         panel.setFrameOrigin(origin)
-
-        // 终态只留状态灯（绿点/红点），进行中才显示「思考中 / 第 N 步」文字条。
-        let size = status.isTerminal ? .zero : PipCloneLabelView.size(for: status.text)
-        if size.width > 0 {
-            labelPanel.setFrame(NSRect(x: origin.x - size.width - 4,
-                                       y: origin.y + (side - size.height) / 2,
-                                       width: size.width,
-                                       height: size.height),
-                                display: true)
-            labelView.frame = NSRect(origin: .zero, size: size)
-            labelPanel.orderFrontRegardless()
-        } else {
-            labelPanel.orderOut(nil)
-        }
+        layoutLabel(ballOrigin: origin)
 
         if let menu = menuPanel, menu.isVisible {
             positionMenu(menu)
         }
     }
 
+    private var labelText: String {
+        labelHidden ? "" : status.text
+    }
+
+    private func layoutLabel(ballOrigin: CGPoint? = nil) {
+        let text = labelView.text
+        guard !text.isEmpty else {
+            labelPanel.orderOut(nil)
+            return
+        }
+        let origin = ballOrigin ?? panel.frame.origin
+        let width = PipCloneLabelView.width(for: text)
+        labelPanel.setFrame(NSRect(x: origin.x - width - 4,
+                                   y: origin.y + (PipCloneBallView.side - PipCloneLabelView.height) / 2,
+                                   width: width,
+                                   height: PipCloneLabelView.height),
+                            display: true)
+        labelView.frame = NSRect(x: 0, y: 0, width: width, height: PipCloneLabelView.height)
+        labelPanel.orderFrontRegardless()
+    }
+
     private func applyStatus() {
         ballView.status = status
-        labelView.text = status.text
         startPulseIfNeeded()
-        reposition(to: lastFrame)
+
+        labelHideTimer?.invalidate()
+        labelHideTimer = nil
+        labelHidden = !status.showsLabel
+
+        switch status {
+        case .finished:
+            scheduleLabelHide(after: PipCloneController.finishedHold)
+        case .failed:
+            scheduleLabelHide(after: PipCloneController.failedHold)
+        default:
+            break
+        }
+
+        updateLabel(animated: true)
+    }
+
+    private func scheduleLabelHide(after seconds: TimeInterval) {
+        let timer = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.labelHidden = true
+            self.updateLabel(animated: true)
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        labelHideTimer = timer
+    }
+
+    /// 文本换得立即生效，只对透明度做 120ms 淡入淡出。
+    /// 不用动画 completion 去换文本：面板不可见时 completion 可能不回调，会丢更新。
+    private func updateLabel(animated: Bool) {
+        labelGeneration &+= 1
+        let generation = labelGeneration
+        let text = labelText
+
+        guard !text.isEmpty else {
+            guard labelPanel.isVisible else { return }
+            guard animated else {
+                labelPanel.orderOut(nil)
+                return
+            }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.12
+                labelPanel.animator().alphaValue = 0
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.13) { [weak self] in
+                guard let self, self.labelGeneration == generation else { return }
+                self.labelPanel.orderOut(nil)
+            }
+            return
+        }
+
+        labelView.text = text
+        layoutLabel()
+        guard animated else {
+            labelPanel.alphaValue = 1
+            return
+        }
+        labelPanel.alphaValue = 0.2
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            labelPanel.animator().alphaValue = 1
+        }
     }
 
     // MARK: - Menu
@@ -197,6 +282,8 @@ final class PipCloneController {
         watchdog = nil
         pulseTimer?.invalidate()
         pulseTimer = nil
+        labelHideTimer?.invalidate()
+        labelHideTimer = nil
         menuPanel?.orderOut(nil)
         menuPanel = nil
         labelPanel.orderOut(nil)

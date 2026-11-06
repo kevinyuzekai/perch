@@ -9,6 +9,8 @@ struct PipEyeState {
     var openness: CGFloat = 0
     /// 眨眼程度，0 睁开，1 闭合。
     var blink: CGFloat = 0
+    /// 有任务在跑时的活跃脉冲，0...1（0 = 完全静止）。
+    var activity: CGFloat = 0
 }
 
 /// 纯绘制的拟物白球：径向渐变 + 边缘高光 + 柔和阴影 + 两只朝向视线的眼睛。
@@ -31,6 +33,20 @@ enum PipEyeRenderer {
         drawBody(ballRect: ballRect)
         drawRim(ballRect: ballRect, side: side)
         drawEyes(ballRect: ballRect, radius: radius, state: state, scale: eyeScale)
+        drawActivity(ballRect: ballRect, radius: radius, activity: state.activity)
+    }
+
+    /// 眼睛下方一个很淡的呼吸小点：有任务在跑时才出现，不抢眼。
+    private static func drawActivity(ballRect: NSRect, radius: CGFloat, activity: CGFloat) {
+        guard activity > 0.01 else { return }
+        let dotRadius = max(0.8, radius * 0.10)
+        let center = CGPoint(x: ballRect.midX, y: ballRect.minY + radius * 0.40)
+        let alpha = 0.18 + 0.42 * min(max(activity, 0), 1)
+        NSColor(white: 0.18, alpha: alpha).setFill()
+        NSBezierPath(ovalIn: NSRect(x: center.x - dotRadius,
+                                    y: center.y - dotRadius,
+                                    width: dotRadius * 2,
+                                    height: dotRadius * 2)).fill()
     }
 
     private static func drawShadow(ballRect: NSRect, side: CGFloat, alpha: CGFloat) {

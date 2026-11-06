@@ -1,23 +1,53 @@
 import Foundation
 import AppKit
 
-/// 分身的状态灯语义。
+/// 把 AgentEvent 里的文本压成一行摘要。
+/// AgentLoopPrompt.stepSummary 的形态是「思考｜动作标签」，所以优先取「｜」后半段；
+/// 失败信息等自由文本直接整体截断。
+enum PipStepSummary {
+    static let separator = "｜"
+
+    static func actionLabel(from text: String, limit: Int = 30) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let parts = trimmed.components(separatedBy: separator)
+        if parts.count >= 2,
+           let tail = parts.dropFirst().last(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+            return clip(tail.trimmingCharacters(in: .whitespacesAndNewlines), limit: limit)
+        }
+        return clip(trimmed, limit: limit)
+    }
+
+    static func clip(_ text: String, limit: Int) -> String {
+        guard text.count > limit else { return text }
+        return String(text.prefix(limit)) + "…"
+    }
+}
+
+/// 分身的状态灯语义 + 状态条文案。
 enum PipCloneStatus: Equatable {
     case starting
-    case running(step: Int)
-    case finished
-    case failed
+    case running(step: Int, total: Int, detail: String)
+    case finished(detail: String)
+    case failed(detail: String)
     case cancelled
     case notReady
 
     var text: String {
         switch self {
-        case .starting: return "思考中"
-        case .running(let step): return "第 \(step) 步"
-        case .finished: return "完成"
-        case .failed: return "失败"
-        case .cancelled: return "已取消"
-        case .notReady: return "AI 未就绪"
+        case .starting:
+            return "思考中"
+        case .running(let step, let total, let detail):
+            let head = total > 0 ? "第 \(step)/\(total) 步" : "第 \(step) 步"
+            return detail.isEmpty ? head : "\(head) · \(detail)"
+        case .finished(let detail):
+            return detail.isEmpty ? "完成" : "完成 · \(detail)"
+        case .failed(let detail):
+            return detail.isEmpty ? "失败" : "失败 · \(detail)"
+        case .cancelled:
+            return "已取消"
+        case .notReady:
+            return "AI 未就绪"
         }
     }
 
@@ -45,6 +75,11 @@ enum PipCloneStatus: Equatable {
         case .finished, .failed, .cancelled: return true
         default: return false
         }
+    }
+
+    /// 取消只留灰点，其余状态都有文字条。
+    var showsLabel: Bool {
+        self != .cancelled
     }
 }
 
@@ -96,18 +131,24 @@ final class PipCloneBallView: NSView {
     }
 }
 
-/// 分身的状态文字条：完全不吃鼠标事件，绝不拦截所属窗口的点击。
+/// 分身的状态文字条：固定高 16，宽度上限 220，单行尾部截断；
+/// 完全不吃鼠标事件，绝不拦截所属窗口的点击。
 final class PipCloneLabelView: NSView {
+    static let height: CGFloat = 16
+    static let maxWidth: CGFloat = 220
+    static let horizontalInset: CGFloat = 7
+
+    private static let font = NSFont.systemFont(ofSize: 9, weight: .semibold)
+
     var text: String = "" {
         didSet { needsDisplay = true }
     }
 
-    private static let font = NSFont.systemFont(ofSize: 9, weight: .semibold)
-
-    static func size(for text: String) -> NSSize {
-        guard !text.isEmpty else { return .zero }
-        let width = (text as NSString).size(withAttributes: [.font: font]).width
-        return NSSize(width: ceil(width) + 14, height: 16)
+    /// 文本对应的条宽（已按 220pt 封顶）。
+    static func width(for text: String) -> CGFloat {
+        guard !text.isEmpty else { return 0 }
+        let measured = (text as NSString).size(withAttributes: [.font: font]).width
+        return min(maxWidth, ceil(measured) + horizontalInset * 2)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -118,14 +159,20 @@ final class PipCloneLabelView: NSView {
         path.lineWidth = 1
         path.stroke()
 
+        guard !text.isEmpty else { return }
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
         let attributes: [NSAttributedString.Key: Any] = [
             .font: PipCloneLabelView.font,
-            .foregroundColor: NSColor(white: 0.96, alpha: 1)
+            .foregroundColor: NSColor(white: 0.96, alpha: 1),
+            .paragraphStyle: paragraph
         ]
-        let textSize = (text as NSString).size(withAttributes: attributes)
-        let origin = NSPoint(x: (bounds.width - textSize.width) / 2,
-                             y: (bounds.height - textSize.height) / 2)
-        (text as NSString).draw(at: origin, withAttributes: attributes)
+        let lineHeight = ceil(PipCloneLabelView.font.ascender - PipCloneLabelView.font.descender) + 1
+        let rect = NSRect(x: PipCloneLabelView.horizontalInset,
+                          y: (bounds.height - lineHeight) / 2,
+                          width: max(0, bounds.width - PipCloneLabelView.horizontalInset * 2),
+                          height: lineHeight)
+        (text as NSString).draw(in: rect, withAttributes: attributes)
     }
 }
 
