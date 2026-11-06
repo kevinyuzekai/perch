@@ -74,7 +74,12 @@ iconutil -c icns Resources/AppIcon.iconset -o Resources/AppIcon.icns
 ```bash
 ./dev.sh            # 仅编译（沙盒必须走这个：内部重定向了 CLANG_MODULE_CACHE_PATH 并加 --disable-sandbox）
 ./build.sh          # 编译 + 打包签名 build/Perch.app
+./dist.sh           # 签名 + 公证 + 打包 zip 与 dmg
 ```
+
+需要 macOS 14+ 与 Swift 6；App 本身不含任何 API Key，模型费用由你自己的账号承担。
+自行分发时需要一个 Developer ID 证书（Xcode → Settings → Accounts → Manage Certificates 可申请），
+没有证书也能本地构建，只是签名退化为 ad-hoc。
 
 并发编译加 `--scratch-path .build-<名字>` 避免 .build 锁冲突。
 
